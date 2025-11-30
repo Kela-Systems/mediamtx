@@ -11,6 +11,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/multicast"
 	"github.com/bluenviron/gortsplib/v5/pkg/readbuffer"
 	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
+	"github.com/wlynxg/anet"
 )
 
 type packetConn interface {
@@ -72,7 +73,7 @@ func defaultInterfaceForMulticast(multicastAddr *net.UDPAddr) (*net.Interface, e
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	conn.Close()
 
-	interfaces, err := net.Interfaces()
+	interfaces, err := anet.Interfaces()
 	if err != nil {
 		return nil, err
 	}
