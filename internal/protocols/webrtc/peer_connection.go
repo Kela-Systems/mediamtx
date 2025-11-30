@@ -20,6 +20,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/wlynxg/anet"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 )
 
 func interfaceIPs(interfaceList []string) ([]string, error) {
-	intfs, err := net.Interfaces()
+	intfs, err := anet.Interfaces()
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +38,7 @@ func interfaceIPs(interfaceList []string) ([]string, error) {
 	for _, intf := range intfs {
 		if len(interfaceList) == 0 || slices.Contains(interfaceList, intf.Name) {
 			var addrs []net.Addr
-			addrs, err = intf.Addrs()
+			addrs, err = anet.InterfaceAddrsByInterface(&intf)
 			if err == nil {
 				for _, addr := range addrs {
 					var ip net.IP

@@ -14,10 +14,11 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/test"
+	"github.com/wlynxg/anet"
 )
 
 func multicastCapableInterface(t *testing.T) string {
-	intfs, err := net.Interfaces()
+	intfs, err := anet.Interfaces()
 	require.NoError(t, err)
 
 	for _, intf := range intfs {

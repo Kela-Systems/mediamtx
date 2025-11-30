@@ -6,5 +6,5 @@ import (
 	"embed"
 )
 
-//go:embed mtxrpicam_64/*
+// //go:embed mtxrpicam_64/*
 var mtxrpicam embed.FS
