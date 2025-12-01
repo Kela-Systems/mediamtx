@@ -286,26 +286,32 @@ func (s *session) runRead() (int, error) {
 	}
 
 	// Check if this path should use ABR
-	// ABR is only used when requesting the virtual path (prefix), not specific quality level paths
+	// ABR is ONLY used when the path is explicitly configured as an ABR path (webrtcABRPath: true)
+	// OR when there's already an active ABR group for this path.
+	// Quality level paths (mystream_2000) always use standard reading for direct access.
 	var abrPrefix string
+	var fallbackPath string // Used when only 1 quality level is found
 	if s.abrManager != nil {
-		// Check if the path itself is an ABR virtual path (the prefix)
-		if s.abrManager.IsABRPath(s.req.pathName) {
-			abrPrefix = s.req.pathName
-		} else {
-			// Check if this could be an ABR prefix by trying to discover quality levels
-			// This handles the case where user requests "mystream" and we have "mystream_2000", "mystream_1000"
-			// But NOT when user requests "mystream_2000" directly - that should use standard reading
-			_, bitrate, isQualityLevel := abr.ParsePathBitrate(s.req.pathName)
-			if !isQualityLevel || bitrate == 0 {
-				// Not a quality level path - try to discover ABR group
+		// Check if this is a quality level path (like mystream_2000)
+		// Quality level paths always use standard reading for direct access
+		_, bitrate, isQualityLevel := abr.ParsePathBitrate(s.req.pathName)
+		if !isQualityLevel || bitrate == 0 {
+			// Not a quality level path - check if it's an ABR path
+			if s.abrManager.IsABRPath(s.req.pathName) {
+				// Path is explicitly configured or has active quality group
+				// Try to discover/verify quality levels
 				_, err := s.abrManager.DiscoverQualityGroup(s.req.pathName)
 				if err == nil {
 					abrPrefix = s.req.pathName
-					s.Log(logger.Info, "discovered ABR group for prefix: %s", abrPrefix)
+				} else {
+					// Check if only 1 quality level was found - fall back to that stream
+					var singleErr *abr.SingleQualityLevelError
+					if errors.As(err, &singleErr) {
+						fallbackPath = singleErr.FoundPath
+						s.Log(logger.Info, "ABR: only one quality level found (%s), using direct reading", fallbackPath)
+					}
 				}
 			}
-			// If it IS a quality level path (like mystream_2000), use standard reading
 		}
 	}
 
@@ -314,7 +320,12 @@ func (s *session) runRead() (int, error) {
 		return s.runReadABR(req, abrPrefix)
 	}
 
-	// Standard reading (non-ABR)
+	// If only one quality level was found, read from that path directly
+	if fallbackPath != "" {
+		req.Name = fallbackPath
+	}
+
+	// Standard reading (non-ABR or single quality level fallback)
 	return s.runReadStandard(req)
 }
 

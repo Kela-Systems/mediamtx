@@ -125,6 +125,13 @@ type Path struct {
 	DropNonKeyframes           bool           `json:"dropNonKeyframes"`
 	Metadata                   map[string]any `json:"metadata" yaml:"metadata"`
 
+	// WebRTC ABR (Adaptive Bitrate)
+	// When true, this path acts as an ABR virtual path that aggregates quality levels.
+	// Quality level paths should follow the naming convention: <this_path>_<bitrate>
+	// e.g., if this path is "mystream" with webrtcABRPath: true,
+	// it will aggregate mystream_2000, mystream_1000, etc.
+	WebRTCABRPath bool `json:"webrtcABRPath"`
+
 	// Record
 	Record                bool         `json:"record"`
 	Playback              *bool        `json:"playback,omitempty"` // deprecated

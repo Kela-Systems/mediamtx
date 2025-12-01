@@ -621,8 +621,13 @@ func (s *Server) APISessionsKick(uuid uuid.UUID) error {
 
 // PathReady is called when a path becomes ready with a stream.
 // This is used to register paths with the ABR manager.
-func (s *Server) PathReady(pathName string, strm *stream.Stream) {
+func (s *Server) PathReady(pathName string, strm *stream.Stream, pathConf *conf.Path) {
 	if s.abrManager != nil {
+		// Register as explicit ABR path if configured
+		if pathConf != nil && pathConf.WebRTCABRPath {
+			s.abrManager.RegisterABRPath(pathName)
+		}
+		// Always register path for potential quality level discovery
 		s.abrManager.RegisterPath(pathName, strm, strm.Desc)
 	}
 }
@@ -630,6 +635,7 @@ func (s *Server) PathReady(pathName string, strm *stream.Stream) {
 // PathNotReady is called when a path is no longer ready.
 func (s *Server) PathNotReady(pathName string) {
 	if s.abrManager != nil {
+		s.abrManager.UnregisterABRPath(pathName)
 		s.abrManager.UnregisterPath(pathName)
 	}
 }

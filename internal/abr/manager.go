@@ -17,18 +17,30 @@ type PathManager interface {
 	AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
 }
 
+// SingleQualityLevelError is returned when only one quality level is found for an ABR prefix.
+// This allows callers to fall back to reading that single stream directly.
+type SingleQualityLevelError struct {
+	Prefix    string
+	FoundPath string
+}
+
+func (e *SingleQualityLevelError) Error() string {
+	return fmt.Sprintf("only one quality level found for ABR prefix %s: %s", e.Prefix, e.FoundPath)
+}
+
 // Manager is the main ABR manager that tracks quality groups and provides
 // adaptive reading capabilities.
 type Manager struct {
 	Log         logger.Writer
 	PathManager PathManager
 
-	mu           sync.RWMutex
-	groupManager *GroupManager
-	pathStreams  map[string]*pathStreamInfo // pathName -> stream info
-	pathRefs     map[string]defs.Path       // pathName -> path reference
-	ctx          context.Context
-	ctxCancel    context.CancelFunc
+	mu                 sync.RWMutex
+	groupManager       *GroupManager
+	pathStreams        map[string]*pathStreamInfo // pathName -> stream info
+	pathRefs           map[string]defs.Path       // pathName -> path reference
+	configuredABRPaths map[string]bool            // explicitly configured ABR paths
+	ctx                context.Context
+	ctxCancel          context.CancelFunc
 }
 
 type pathStreamInfo struct {
@@ -41,13 +53,14 @@ type pathStreamInfo struct {
 func NewManager(log logger.Writer, pm PathManager) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		Log:          log,
-		PathManager:  pm,
-		groupManager: NewGroupManager(log),
-		pathStreams:  make(map[string]*pathStreamInfo),
-		pathRefs:     make(map[string]defs.Path),
-		ctx:          ctx,
-		ctxCancel:    cancel,
+		Log:                log,
+		PathManager:        pm,
+		groupManager:       NewGroupManager(log),
+		pathStreams:        make(map[string]*pathStreamInfo),
+		pathRefs:           make(map[string]defs.Path),
+		configuredABRPaths: make(map[string]bool),
+		ctx:                ctx,
+		ctxCancel:          cancel,
 	}
 
 	// Set up callbacks for group lifecycle
@@ -97,8 +110,46 @@ func (m *Manager) SetPathAvailable(pathName string, available bool) {
 }
 
 // IsABRPath checks if the given path name is an ABR virtual path.
+// This returns true if:
+// 1. The path is explicitly configured as an ABR path (webrtcABRPath: true)
+// 2. OR there's an active quality group with multiple levels for this prefix
 func (m *Manager) IsABRPath(pathName string) bool {
+	// Check if explicitly configured as ABR path
+	m.mu.Lock()
+	if m.configuredABRPaths[pathName] {
+		m.mu.Unlock()
+		return true
+	}
+	m.mu.Unlock()
+
+	// Fall back to checking if there's an active quality group
 	return m.groupManager.IsABRPath(pathName)
+}
+
+// RegisterABRPath registers a path as an explicit ABR virtual path.
+// This is called when a path with webrtcABRPath: true is configured.
+func (m *Manager) RegisterABRPath(pathName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.configuredABRPaths == nil {
+		m.configuredABRPaths = make(map[string]bool)
+	}
+	m.configuredABRPaths[pathName] = true
+	m.Log.Log(logger.Info, "ABR: registered explicit ABR path: %s", pathName)
+}
+
+// UnregisterABRPath removes a path from explicit ABR paths.
+func (m *Manager) UnregisterABRPath(pathName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.configuredABRPaths, pathName)
+}
+
+// IsExplicitABRPath checks if a path is explicitly configured as ABR (not auto-discovered).
+func (m *Manager) IsExplicitABRPath(pathName string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.configuredABRPaths[pathName]
 }
 
 // GetQualityGroup returns the quality group for a path prefix.
@@ -220,8 +271,13 @@ func (m *Manager) DiscoverQualityGroup(prefix string) (*QualityGroup, error) {
 		for _, pathName := range discoveredPaths {
 			m.ReleaseStream(pathName)
 		}
-		return nil, fmt.Errorf("not enough quality levels found for ABR prefix: %s (found %d, need at least 2)",
-			prefix, len(discoveredPaths))
+		if len(discoveredPaths) == 1 {
+			return nil, &SingleQualityLevelError{
+				Prefix:    prefix,
+				FoundPath: discoveredPaths[0],
+			}
+		}
+		return nil, fmt.Errorf("no quality levels found for ABR prefix: %s", prefix)
 	}
 
 	group, ok := m.groupManager.GetGroup(prefix)

@@ -61,7 +61,7 @@ type pathSetHLSServerReq struct {
 
 // pathWebRTCServer is the interface for the WebRTC server to receive path notifications.
 type pathWebRTCServer interface {
-	PathReady(pathName string, strm *stream.Stream)
+	PathReady(pathName string, strm *stream.Stream, pathConf *conf.Path)
 	PathNotReady(pathName string)
 }
 
@@ -312,7 +312,7 @@ func (pm *pathManager) doPathReady(pa *path) {
 	}
 
 	if pm.webrtcServer != nil {
-		pm.webrtcServer.PathReady(pa.name, pa.stream)
+		pm.webrtcServer.PathReady(pa.name, pa.stream, pa.conf)
 	}
 }
 
@@ -605,7 +605,7 @@ func (pm *pathManager) SetWebRTCServer(s pathWebRTCServer) {
 	// Notify about already ready paths
 	for _, pd := range pm.paths {
 		if pd.ready && pd.path.stream != nil {
-			s.PathReady(pd.path.name, pd.path.stream)
+			s.PathReady(pd.path.name, pd.path.stream, pd.path.conf)
 		}
 	}
 }
