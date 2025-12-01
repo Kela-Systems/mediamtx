@@ -59,6 +59,12 @@ type pathSetHLSServerReq struct {
 	res chan pathSetHLSServerRes
 }
 
+// pathWebRTCServer is the interface for the WebRTC server to receive path notifications.
+type pathWebRTCServer interface {
+	PathReady(pathName string, strm *stream.Stream)
+	PathNotReady(pathName string)
+}
+
 type pathData struct {
 	path     *path
 	ready    bool
@@ -83,11 +89,12 @@ type pathManager struct {
 	metrics           *metrics.Metrics
 	parent            pathManagerParent
 
-	ctx       context.Context
-	ctxCancel func()
-	wg        sync.WaitGroup
-	hlsServer *hls.Server
-	paths     map[string]*pathData
+	ctx          context.Context
+	ctxCancel    func()
+	wg           sync.WaitGroup
+	hlsServer    *hls.Server
+	webrtcServer pathWebRTCServer
+	paths        map[string]*pathData
 
 	// in
 	chReloadConf   chan map[string]*conf.Path
@@ -303,6 +310,10 @@ func (pm *pathManager) doPathReady(pa *path) {
 	if pm.hlsServer != nil {
 		pm.hlsServer.PathReady(pa)
 	}
+
+	if pm.webrtcServer != nil {
+		pm.webrtcServer.PathReady(pa.name, pa.stream)
+	}
 }
 
 func (pm *pathManager) doPathNotReady(pa *path) {
@@ -314,6 +325,10 @@ func (pm *pathManager) doPathNotReady(pa *path) {
 
 	if pm.hlsServer != nil {
 		pm.hlsServer.PathNotReady(pa)
+	}
+
+	if pm.webrtcServer != nil {
+		pm.webrtcServer.PathNotReady(pa.name)
 	}
 }
 
@@ -580,6 +595,18 @@ func (pm *pathManager) SetHLSServer(s *hls.Server) []defs.Path {
 
 	case <-pm.ctx.Done():
 		return nil
+	}
+}
+
+// SetWebRTCServer is called by webrtc.Server to register for path notifications.
+func (pm *pathManager) SetWebRTCServer(s pathWebRTCServer) {
+	pm.webrtcServer = s
+
+	// Notify about already ready paths
+	for _, pd := range pm.paths {
+		if pd.ready && pd.path.stream != nil {
+			s.PathReady(pd.path.name, pd.path.stream)
+		}
 	}
 }
 

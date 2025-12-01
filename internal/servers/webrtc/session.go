@@ -16,6 +16,7 @@ import (
 	"github.com/pion/sdp/v3"
 	pwebrtc "github.com/pion/webrtc/v4"
 
+	"github.com/bluenviron/mediamtx/internal/abr"
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
@@ -55,6 +56,7 @@ type session struct {
 	wg                    *sync.WaitGroup
 	externalCmdPool       *externalcmd.Pool
 	pathManager           serverPathManager
+	abrManager            *abr.Manager
 	parent                sessionParent
 
 	ctx       context.Context
@@ -283,6 +285,40 @@ func (s *session) runRead() (int, error) {
 		IP:          net.ParseIP(ip),
 	}
 
+	// Check if this path should use ABR
+	// ABR is only used when requesting the virtual path (prefix), not specific quality level paths
+	var abrPrefix string
+	if s.abrManager != nil {
+		// Check if the path itself is an ABR virtual path (the prefix)
+		if s.abrManager.IsABRPath(s.req.pathName) {
+			abrPrefix = s.req.pathName
+		} else {
+			// Check if this could be an ABR prefix by trying to discover quality levels
+			// This handles the case where user requests "mystream" and we have "mystream_2000", "mystream_1000"
+			// But NOT when user requests "mystream_2000" directly - that should use standard reading
+			_, bitrate, isQualityLevel := abr.ParsePathBitrate(s.req.pathName)
+			if !isQualityLevel || bitrate == 0 {
+				// Not a quality level path - try to discover ABR group
+				_, err := s.abrManager.DiscoverQualityGroup(s.req.pathName)
+				if err == nil {
+					abrPrefix = s.req.pathName
+					s.Log(logger.Info, "discovered ABR group for prefix: %s", abrPrefix)
+				}
+			}
+			// If it IS a quality level path (like mystream_2000), use standard reading
+		}
+	}
+
+	// If ABR is available for this path, use adaptive reading
+	if abrPrefix != "" {
+		return s.runReadABR(req, abrPrefix)
+	}
+
+	// Standard reading (non-ABR)
+	return s.runReadStandard(req)
+}
+
+func (s *session) runReadStandard(req defs.PathAccessRequest) (int, error) {
 	path, strm, err := s.pathManager.AddReader(defs.PathAddReaderReq{
 		Author:        s,
 		AccessRequest: req,
@@ -387,6 +423,143 @@ func (s *session) runRead() (int, error) {
 
 	case err = <-r.Error():
 		return 0, err
+
+	case <-s.ctx.Done():
+		return 0, fmt.Errorf("terminated")
+	}
+}
+
+func (s *session) runReadABR(accessReq defs.PathAccessRequest, abrPrefix string) (int, error) {
+	// Get the quality group (should already be discovered at this point)
+	group, ok := s.abrManager.GetQualityGroup(abrPrefix)
+	if !ok || !group.HasMultipleLevels() {
+		// Fall back to standard reading if group is not valid
+		s.Log(logger.Debug, "ABR group not valid for %s, falling back to standard reading", abrPrefix)
+		return s.runReadStandard(accessReq)
+	}
+
+	iceServers, err := s.parent.generateICEServers(false)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+
+	// Create peer connection
+	pc := &webrtc.PeerConnection{
+		UDPReadBufferSize:     s.udpReadBufferSize,
+		ICEUDPMux:             s.iceUDPMux,
+		ICETCPMux:             s.iceTCPMux,
+		ICEServers:            iceServers,
+		IPsFromInterfaces:     s.ipsFromInterfaces,
+		IPsFromInterfacesList: s.ipsFromInterfacesList,
+		AdditionalHosts:       s.additionalHosts,
+		HandshakeTimeout:      s.handshakeTimeout,
+		TrackGatherTimeout:    s.trackGatherTimeout,
+		STUNGatherTimeout:     s.stunGatherTimeout,
+		Publish:               true,
+		Log:                   s,
+	}
+
+	// Get any quality level to set up initial tracks (all levels should have same codec)
+	anyLevel, ok := group.LowestLevel()
+	if !ok {
+		return http.StatusNotFound, fmt.Errorf("no quality levels available for: %s", abrPrefix)
+	}
+
+	// Get stream to set up tracks
+	_, initialDesc, err := s.abrManager.GetStream(anyLevel.Path)
+	if err != nil {
+		return http.StatusNotFound, err
+	}
+
+	// Set up tracks using a dummy reader - we just need the tracks created
+	dummyReader := &stream.Reader{Parent: s}
+	err = webrtc.FromStream(initialDesc, dummyReader, pc)
+	if err != nil {
+		s.abrManager.ReleaseStream(anyLevel.Path)
+		return http.StatusBadRequest, err
+	}
+	s.abrManager.ReleaseStream(anyLevel.Path)
+
+	err = pc.Start()
+	if err != nil {
+		return http.StatusBadRequest, err
+	}
+
+	terminatorDone := make(chan struct{})
+	defer func() { <-terminatorDone }()
+
+	terminatorRun := make(chan struct{})
+	defer close(terminatorRun)
+
+	// Create bandwidth provider
+	bandwidthProvider := abr.BandwidthProviderFunc(func() int {
+		return pc.GetBandwidthEstimate().Bitrate
+	})
+
+	// Create setup function that uses FromStream for each quality level
+	setupReader := func(desc *description.Session, r *stream.Reader) error {
+		// We need to set up encoding callbacks that write to the existing tracks.
+		// FromStream would create new tracks, so we use a custom setup.
+		return webrtc.SetupReaderCallbacks(desc, r, pc)
+	}
+
+	// Create prepare for switch function
+	prepareForSwitch := func() {
+		pc.PrepareTracksForSwitch()
+	}
+
+	adaptiveReader := abr.NewAdaptiveReader(
+		group,
+		s.abrManager,
+		bandwidthProvider,
+		s,
+		s, // parent for stream.Reader
+		setupReader,
+		prepareForSwitch,
+	)
+
+	go func() {
+		defer close(terminatorDone)
+		select {
+		case <-s.ctx.Done():
+		case <-terminatorRun:
+		}
+		adaptiveReader.Close()
+		pc.Close()
+	}()
+
+	offer := whipOffer(s.req.offer)
+
+	answer, err := pc.CreateFullAnswer(offer)
+	if err != nil {
+		return http.StatusBadRequest, err
+	}
+
+	s.writeAnswer(answer)
+
+	go s.readRemoteCandidates(pc)
+
+	err = pc.WaitUntilConnected()
+	if err != nil {
+		return 0, err
+	}
+
+	s.mutex.Lock()
+	s.pc = pc
+	s.mutex.Unlock()
+
+	// Start adaptive reader
+	err = adaptiveReader.Start()
+	if err != nil {
+		return 0, err
+	}
+
+	s.Log(logger.Info, "is reading from ABR path '%s' (starting level: %s)",
+		abrPrefix, adaptiveReader.CurrentPath())
+
+	select {
+	case <-pc.Failed():
+		return 0, fmt.Errorf("peer connection closed")
 
 	case <-s.ctx.Done():
 		return 0, fmt.Errorf("terminated")

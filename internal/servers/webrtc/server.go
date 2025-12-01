@@ -23,6 +23,7 @@ import (
 	pwebrtc "github.com/pion/webrtc/v4"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/readbuffer"
+	"github.com/bluenviron/mediamtx/internal/abr"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
@@ -204,6 +205,7 @@ type Server struct {
 	HandshakeTimeout      conf.Duration
 	TrackGatherTimeout    conf.Duration
 	STUNGatherTimeout     conf.Duration
+	EnableABR             bool // Enable adaptive bitrate streaming
 	ExternalCmdPool       *externalcmd.Pool
 	Metrics               serverMetrics
 	PathManager           serverPathManager
@@ -218,6 +220,7 @@ type Server struct {
 	iceTCPMux        *webrtc.TCPMuxWrapper
 	sessions         map[*session]struct{}
 	sessionsBySecret map[uuid.UUID]*session
+	abrManager       *abr.Manager
 
 	// in
 	chNewSession           chan webRTCNewSessionReq
@@ -312,7 +315,15 @@ func (s *Server) Initialize() error {
 	if s.tcpMuxLn != nil {
 		str += ", " + s.LocalTCPAddress + " (ICE/TCP)"
 	}
+	if s.EnableABR {
+		str += ", ABR enabled"
+	}
 	s.Log(logger.Info, str)
+
+	// Initialize ABR manager if enabled
+	if s.EnableABR {
+		s.abrManager = abr.NewManager(s, s.PathManager)
+	}
 
 	go s.run()
 
@@ -334,6 +345,10 @@ func (s *Server) Close() {
 
 	if !interfaceIsEmpty(s.Metrics) {
 		s.Metrics.SetWebRTCServer(nil)
+	}
+
+	if s.abrManager != nil {
+		s.abrManager.Close()
 	}
 
 	s.ctxCancel()
@@ -364,6 +379,7 @@ outer:
 				wg:                    &wg,
 				externalCmdPool:       s.ExternalCmdPool,
 				pathManager:           s.PathManager,
+				abrManager:            s.abrManager,
 				parent:                s,
 			}
 			sx.initialize()
@@ -601,4 +617,24 @@ func (s *Server) APISessionsKick(uuid uuid.UUID) error {
 	case <-s.ctx.Done():
 		return fmt.Errorf("terminated")
 	}
+}
+
+// PathReady is called when a path becomes ready with a stream.
+// This is used to register paths with the ABR manager.
+func (s *Server) PathReady(pathName string, strm *stream.Stream) {
+	if s.abrManager != nil {
+		s.abrManager.RegisterPath(pathName, strm, strm.Desc)
+	}
+}
+
+// PathNotReady is called when a path is no longer ready.
+func (s *Server) PathNotReady(pathName string) {
+	if s.abrManager != nil {
+		s.abrManager.UnregisterPath(pathName)
+	}
+}
+
+// ABRManager returns the ABR manager, or nil if ABR is disabled.
+func (s *Server) ABRManager() *abr.Manager {
+	return s.abrManager
 }

@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/rtpsender"
@@ -17,6 +18,14 @@ type OutgoingTrack struct {
 	track      *webrtc.TrackLocalStaticRTP
 	ssrc       uint32
 	rtcpSender *rtpsender.Sender
+
+	// Timestamp continuity for ABR switching
+	tsMu              sync.Mutex
+	lastTimestamp     uint32 // Last timestamp sent to browser
+	timestampOffset   uint32 // Offset to add to incoming timestamps
+	firstTsReceived   bool   // Whether we've received the first timestamp
+	firstTsValue      uint32 // First timestamp value from current source
+	switchPending     bool   // Whether a stream switch is pending
 }
 
 func (t *OutgoingTrack) isVideo() bool {
@@ -93,7 +102,47 @@ func (t *OutgoingTrack) WriteRTPWithNTP(pkt *rtp.Packet, ntp time.Time) error {
 	// use right SSRC in packet to make rtcpSender work
 	pkt.SSRC = t.ssrc
 
+	// Handle timestamp continuity for ABR
+	t.tsMu.Lock()
+	if t.switchPending && t.lastTimestamp > 0 {
+		// Stream switch with existing data - calculate offset for continuity
+		if !t.firstTsReceived {
+			t.firstTsReceived = true
+			t.firstTsValue = pkt.Timestamp
+			// Calculate offset: we want new timestamp to continue from last + small gap
+			// Add a small gap (1 frame at 30fps = 3000 at 90kHz)
+			targetTimestamp := t.lastTimestamp + 3000
+			if targetTimestamp > t.firstTsValue {
+				t.timestampOffset = targetTimestamp - t.firstTsValue
+			} else {
+				// New stream has higher timestamps - no offset needed, just reset
+				t.timestampOffset = 0
+			}
+			t.switchPending = false
+		}
+	} else if t.switchPending {
+		// First time setup (no previous data) - no offset needed
+		t.switchPending = false
+		t.timestampOffset = 0
+	}
+
+	// Apply timestamp offset
+	if t.timestampOffset != 0 {
+		pkt.Timestamp += t.timestampOffset
+	}
+	t.lastTimestamp = pkt.Timestamp
+	t.tsMu.Unlock()
+
 	t.rtcpSender.ProcessPacket(pkt, ntp, true)
 
 	return t.track.WriteRTP(pkt)
+}
+
+// PrepareForSwitch marks the track as preparing for a stream switch.
+// Call this before switching to a new quality level.
+func (t *OutgoingTrack) PrepareForSwitch() {
+	t.tsMu.Lock()
+	defer t.tsMu.Unlock()
+	t.switchPending = true
+	t.firstTsReceived = false
 }

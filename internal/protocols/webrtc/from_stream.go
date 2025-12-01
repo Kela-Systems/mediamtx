@@ -678,3 +678,291 @@ func FromStream(
 
 	return nil
 }
+
+// SetupReaderCallbacks sets up encoding callbacks on a reader that write to existing tracks.
+// This is used by ABR where tracks are created once but readers are created for each quality level.
+func SetupReaderCallbacks(
+	desc *description.Session,
+	r *stream.Reader,
+	pc *PeerConnection,
+) error {
+	// Find existing video and audio tracks
+	var videoTrack *OutgoingTrack
+	var audioTrack *OutgoingTrack
+
+	for _, track := range pc.OutgoingTracks {
+		mimeType := track.Caps.MimeType
+		switch mimeType {
+		case webrtc.MimeTypeAV1, webrtc.MimeTypeVP9, webrtc.MimeTypeVP8,
+			webrtc.MimeTypeH265, webrtc.MimeTypeH264:
+			if videoTrack == nil {
+				videoTrack = track
+			}
+		case webrtc.MimeTypeOpus, webrtc.MimeTypeG722, webrtc.MimeTypePCMU, webrtc.MimeTypePCMA,
+			mimeTypeMultiopus, mimeTypeL16:
+			if audioTrack == nil {
+				audioTrack = track
+			}
+		}
+	}
+
+	if videoTrack == nil && audioTrack == nil {
+		return errNoSupportedCodecsFrom
+	}
+
+	// Note: PrepareForSwitch() is NOT called here because we need to wait
+	// until the old reader is removed before preparing for the switch.
+	// The caller (adaptive reader) should call PrepareTracksForSwitch() on the PC
+	// after removing the old reader and before adding the new one.
+
+	// Set up video callbacks
+	if videoTrack != nil {
+		if err := setupVideoCallbacks(desc, r, videoTrack); err != nil {
+			return err
+		}
+	}
+
+	// Set up audio callbacks
+	if audioTrack != nil {
+		if err := setupAudioCallbacks(desc, r, audioTrack); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setupVideoCallbacks(desc *description.Session, r *stream.Reader, track *OutgoingTrack) error {
+	var av1Format *format.AV1
+	media := desc.FindFormat(&av1Format)
+	if av1Format != nil {
+		encoder := &rtpav1.Encoder{
+			PayloadType:    105,
+			PayloadMaxSize: webrtcPayloadMaxSize,
+		}
+		if err := encoder.Init(); err != nil {
+			return err
+		}
+
+		r.OnData(media, av1Format, func(u *unit.Unit) error {
+			if u.NilPayload() {
+				return nil
+			}
+			packets, err := encoder.Encode(u.Payload.(unit.PayloadAV1))
+			if err != nil {
+				return nil //nolint:nilerr
+			}
+			for _, pkt := range packets {
+				ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
+				pkt.Timestamp += u.RTPPackets[0].Timestamp
+				track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+			}
+			return nil
+		})
+		return nil
+	}
+
+	var vp9Format *format.VP9
+	media = desc.FindFormat(&vp9Format)
+	if vp9Format != nil {
+		encoder := &rtpvp9.Encoder{
+			PayloadType:      96,
+			PayloadMaxSize:   webrtcPayloadMaxSize,
+			InitialPictureID: ptrOf(uint16(8445)),
+		}
+		if err := encoder.Init(); err != nil {
+			return err
+		}
+
+		r.OnData(media, vp9Format, func(u *unit.Unit) error {
+			if u.NilPayload() {
+				return nil
+			}
+			packets, err := encoder.Encode(u.Payload.(unit.PayloadVP9))
+			if err != nil {
+				return nil //nolint:nilerr
+			}
+			for _, pkt := range packets {
+				ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
+				pkt.Timestamp += u.RTPPackets[0].Timestamp
+				track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+			}
+			return nil
+		})
+		return nil
+	}
+
+	var vp8Format *format.VP8
+	media = desc.FindFormat(&vp8Format)
+	if vp8Format != nil {
+		encoder := &rtpvp8.Encoder{
+			PayloadType:    96,
+			PayloadMaxSize: webrtcPayloadMaxSize,
+		}
+		if err := encoder.Init(); err != nil {
+			return err
+		}
+
+		r.OnData(media, vp8Format, func(u *unit.Unit) error {
+			if u.NilPayload() {
+				return nil
+			}
+			packets, err := encoder.Encode(u.Payload.(unit.PayloadVP8))
+			if err != nil {
+				return nil //nolint:nilerr
+			}
+			for _, pkt := range packets {
+				ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
+				pkt.Timestamp += u.RTPPackets[0].Timestamp
+				track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+			}
+			return nil
+		})
+		return nil
+	}
+
+	var h265Format *format.H265
+	media = desc.FindFormat(&h265Format)
+	if h265Format != nil {
+		encoder := &rtph265.Encoder{
+			PayloadType:    96,
+			PayloadMaxSize: webrtcPayloadMaxSize,
+		}
+		if err := encoder.Init(); err != nil {
+			return err
+		}
+
+		firstReceived := false
+		var lastPTS int64
+
+		r.OnData(media, h265Format, func(u *unit.Unit) error {
+			if u.NilPayload() {
+				return nil
+			}
+			if !firstReceived {
+				firstReceived = true
+			} else if u.PTS < lastPTS {
+				return fmt.Errorf("WebRTC doesn't support H265 streams with B-frames")
+			}
+			lastPTS = u.PTS
+
+			packets, err := encoder.Encode(u.Payload.(unit.PayloadH265))
+			if err != nil {
+				return nil //nolint:nilerr
+			}
+			for _, pkt := range packets {
+				ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
+				pkt.Timestamp += u.RTPPackets[0].Timestamp
+				track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+			}
+			return nil
+		})
+		return nil
+	}
+
+	var h264Format *format.H264
+	media = desc.FindFormat(&h264Format)
+	if h264Format != nil {
+		encoder := &rtph264.Encoder{
+			PayloadType:    96,
+			PayloadMaxSize: webrtcPayloadMaxSize,
+		}
+		if err := encoder.Init(); err != nil {
+			return err
+		}
+
+		firstReceived := false
+		var lastPTS int64
+
+		r.OnData(media, h264Format, func(u *unit.Unit) error {
+			if u.NilPayload() {
+				return nil
+			}
+			if !firstReceived {
+				firstReceived = true
+			} else if u.PTS < lastPTS {
+				return fmt.Errorf("WebRTC doesn't support H264 streams with B-frames")
+			}
+			lastPTS = u.PTS
+
+			packets, err := encoder.Encode(u.Payload.(unit.PayloadH264))
+			if err != nil {
+				return nil //nolint:nilerr
+			}
+			for _, pkt := range packets {
+				ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
+				pkt.Timestamp += u.RTPPackets[0].Timestamp
+				track.WriteRTPWithNTP(pkt, ntp.Add(-1*time.Minute)) //nolint:errcheck
+			}
+			return nil
+		})
+		return nil
+	}
+
+	return nil
+}
+
+func setupAudioCallbacks(desc *description.Session, r *stream.Reader, track *OutgoingTrack) error {
+	var opusFormat *format.Opus
+	media := desc.FindFormat(&opusFormat)
+	if opusFormat != nil {
+		curTimestamp, err := randUint32()
+		if err != nil {
+			return err
+		}
+
+		r.OnData(media, opusFormat, func(u *unit.Unit) error {
+			for _, orig := range u.RTPPackets {
+				pkt := &rtp.Packet{
+					Header:  orig.Header,
+					Payload: orig.Payload,
+				}
+				pkt.Timestamp = curTimestamp
+				curTimestamp += uint32(opus.PacketDuration2(pkt.Payload))
+				ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp-u.RTPPackets[0].Timestamp), 48000))
+				track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+			}
+			return nil
+		})
+		return nil
+	}
+
+	var g722Format *format.G722
+	media = desc.FindFormat(&g722Format)
+	if g722Format != nil {
+		r.OnData(media, g722Format, func(u *unit.Unit) error {
+			for _, pkt := range u.RTPPackets {
+				ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp-u.RTPPackets[0].Timestamp), 8000))
+				track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+			}
+			return nil
+		})
+		return nil
+	}
+
+	var g711Format *format.G711
+	media = desc.FindFormat(&g711Format)
+	if g711Format != nil {
+		curTimestamp, err := randUint32()
+		if err != nil {
+			return err
+		}
+
+		r.OnData(media, g711Format, func(u *unit.Unit) error {
+			for _, orig := range u.RTPPackets {
+				pkt := &rtp.Packet{
+					Header:  orig.Header,
+					Payload: orig.Payload,
+				}
+				pkt.Timestamp = curTimestamp
+				curTimestamp += uint32(len(pkt.Payload)) / uint32(g711Format.ChannelCount)
+				ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp-u.RTPPackets[0].Timestamp), 8000))
+				track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+			}
+			return nil
+		})
+		return nil
+	}
+
+	return nil
+}

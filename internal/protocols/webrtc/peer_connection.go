@@ -62,10 +62,13 @@ func interfaceIPs(interfaceList []string) ([]string, error) {
 
 // * skip ConfigureRTCPReports
 // * add statsInterceptor
+// * add bweInterceptor for bandwidth estimation
 func registerInterceptors(
 	mediaEngine *webrtc.MediaEngine,
 	interceptorRegistry *interceptor.Registry,
 	onStatsInterceptor func(s *statsInterceptor),
+	onBWEInterceptor func(b *bweInterceptor),
+	bweCallback BWECallback,
 ) error {
 	err := webrtc.ConfigureNack(mediaEngine, interceptorRegistry)
 	if err != nil {
@@ -84,6 +87,12 @@ func registerInterceptors(
 
 	interceptorRegistry.Add(&statsInterceptorFactory{
 		onCreate: onStatsInterceptor,
+	})
+
+	// Add bandwidth estimation interceptor
+	interceptorRegistry.Add(&bweInterceptorFactory{
+		callback: bweCallback,
+		onCreate: onBWEInterceptor,
 	})
 
 	return nil
@@ -146,6 +155,7 @@ type PeerConnection struct {
 	Publish               bool
 	OutgoingTracks        []*OutgoingTrack
 	Log                   logger.Writer
+	OnBandwidthEstimate   BWECallback // Callback for bandwidth estimate changes
 
 	wr               *webrtc.PeerConnection
 	ctx              context.Context
@@ -153,6 +163,7 @@ type PeerConnection struct {
 	incomingTracks   []*IncomingTrack
 	startedReading   *int64
 	statsInterceptor *statsInterceptor
+	bweInterceptor   *bweInterceptor
 
 	newLocalCandidate chan *webrtc.ICECandidateInit
 	incomingTrack     chan trackRecvPair
@@ -280,6 +291,10 @@ func (co *PeerConnection) Start() error {
 		func(s *statsInterceptor) {
 			co.statsInterceptor = s
 		},
+		func(b *bweInterceptor) {
+			co.bweInterceptor = b
+		},
+		co.OnBandwidthEstimate,
 	)
 	if err != nil {
 		return err
@@ -424,6 +439,11 @@ func (co *PeerConnection) run() {
 		}
 		for _, track := range co.OutgoingTracks {
 			track.close()
+		}
+
+		// Close bandwidth estimator
+		if co.bweInterceptor != nil {
+			co.bweInterceptor.Close()
 		}
 
 		co.wr.GracefulClose() //nolint:errcheck
@@ -783,6 +803,22 @@ func (co *PeerConnection) RemoteCandidate() string {
 	}
 
 	return candidateLabel(cp.Remote)
+}
+
+// GetBandwidthEstimate returns the current bandwidth estimate.
+func (co *PeerConnection) GetBandwidthEstimate() BandwidthEstimate {
+	if co.bweInterceptor == nil {
+		return BandwidthEstimate{Bitrate: initialBandwidth}
+	}
+	return co.bweInterceptor.GetEstimate()
+}
+
+// PrepareTracksForSwitch prepares all outgoing tracks for a stream switch.
+// This should be called after removing the old reader and before adding the new one.
+func (co *PeerConnection) PrepareTracksForSwitch() {
+	for _, track := range co.OutgoingTracks {
+		track.PrepareForSwitch()
+	}
 }
 
 func bytesStats(wr *webrtc.PeerConnection) (uint64, uint64) {

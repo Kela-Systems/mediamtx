@@ -607,6 +607,7 @@ func (p *Core) createResources(initial bool) error {
 			HandshakeTimeout:      p.conf.WebRTCHandshakeTimeout,
 			STUNGatherTimeout:     p.conf.WebRTCSTUNGatherTimeout,
 			TrackGatherTimeout:    p.conf.WebRTCTrackGatherTimeout,
+			EnableABR:             p.conf.WebRTCABR,
 			ExternalCmdPool:       p.externalCmdPool,
 			Metrics:               p.metrics,
 			PathManager:           p.pathManager,
@@ -617,6 +618,11 @@ func (p *Core) createResources(initial bool) error {
 			return err
 		}
 		p.webRTCServer = i
+
+		// Register WebRTC server with path manager to receive path notifications
+		if p.webRTCServer.ABRManager() != nil {
+			p.pathManager.SetWebRTCServer(p.webRTCServer)
+		}
 	}
 
 	if p.conf.SRT &&
@@ -889,6 +895,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.WebRTCHandshakeTimeout != p.conf.WebRTCHandshakeTimeout ||
 		newConf.WebRTCSTUNGatherTimeout != p.conf.WebRTCSTUNGatherTimeout ||
 		newConf.WebRTCTrackGatherTimeout != p.conf.WebRTCTrackGatherTimeout ||
+		newConf.WebRTCABR != p.conf.WebRTCABR ||
 		closeMetrics ||
 		closePathManager ||
 		closeLogger

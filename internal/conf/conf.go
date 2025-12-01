@@ -289,6 +289,7 @@ type Conf struct {
 	WebRTCHandshakeTimeout      Duration         `json:"webrtcHandshakeTimeout"`
 	WebRTCTrackGatherTimeout    Duration         `json:"webrtcTrackGatherTimeout"`
 	WebRTCSTUNGatherTimeout     Duration         `json:"webrtcSTUNGatherTimeout"`
+	WebRTCABR                   bool             `json:"webrtcABR"` // Adaptive Bitrate streaming
 	WebRTCICEUDPMuxAddress      *string          `json:"webrtcICEUDPMuxAddress,omitempty"`  // deprecated
 	WebRTCICETCPMuxAddress      *string          `json:"webrtcICETCPMuxAddress,omitempty"`  // deprecated
 	WebRTCICEHostNAT1To1IPs     *[]string        `json:"webrtcICEHostNAT1To1IPs,omitempty"` // deprecated
@@ -422,6 +423,7 @@ func (conf *Conf) setDefaults() {
 	conf.WebRTCHandshakeTimeout = 10 * Duration(time.Second)
 	conf.WebRTCTrackGatherTimeout = 2 * Duration(time.Second)
 	conf.WebRTCSTUNGatherTimeout = 5 * Duration(time.Second)
+	conf.WebRTCABR = true // Enable adaptive bitrate streaming by default
 
 	// SRT server
 	conf.SRT = true
