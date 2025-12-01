@@ -420,6 +420,16 @@ webrtcTrackGatherTimeout: 2s
 # The maximum time to gather STUN candidates.
 webrtcSTUNGatherTimeout: 5s
 
+
+# Enable WebRTC Adaptive Bitrate (ABR) streaming.
+# When enabled, if multiple paths share a common prefix followed by a bitrate number
+# (e.g., mystream_2000, mystream_1000, mystream_500), they will be treated as different
+# quality levels of the same stream. WebRTC readers will automatically switch between
+# quality levels based on their connection's bandwidth estimation.
+# Example: Publishing to paths "live/video_2000" (2 Mbps) and "live/video_1000" (1 Mbps)
+# allows readers to request "live/video" and automatically receive the appropriate quality.
+webrtcABR: yes
+
 ###############################################
 # Global settings -> SRT server
 
@@ -488,6 +498,13 @@ pathDefaults:
   fallback:
   # Use absolute timestamp of frames, instead of replacing them with the current time.
   useAbsoluteTimestamp: false
+  # Mark this path as a WebRTC ABR (Adaptive Bitrate) virtual path.
+  # When enabled, this path will aggregate quality levels that follow
+  # the naming convention <path>_<bitrate>. For example, if this path is
+  # "mystream" with webrtcABRPath: yes, it will aggregate streams from
+  # "mystream_2000", "mystream_1000", etc., and WebRTC readers will
+  # automatically receive the appropriate quality based on bandwidth.
+  webrtcABRPath: no
 
   ###############################################
   # Default path settings -> Record
@@ -755,6 +772,13 @@ paths:
   # example:
   # my_camera:
   #   source: rtsp://my_camera
+
+  # Example: WebRTC ABR (Adaptive Bitrate) configuration
+  # This creates a virtual path that aggregates quality levels.
+  # Publish streams to mystream_2000, mystream_1000, mystream_500, etc.
+  # Then access "mystream" via WebRTC to get adaptive streaming.
+  # mystream:
+  #   webrtcABRPath: yes
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
